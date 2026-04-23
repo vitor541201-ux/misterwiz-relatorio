@@ -1,0 +1,269 @@
+<script>
+// ════════════════════════════════════════════════════════════════
+// ⚙️  CONFIGURAÇÃO — edite apenas esta seção para cada turma
+// ════════════════════════════════════════════════════════════════
+const CONFIG = {
+  csvHabilidades: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQESGm3F1v6E2jFnRIQGzYa95peXCSnq78XkndaK3Y080r9Jeg2jxJlXzD9QxS5dffGRlUG_qkIanvs/pub?gid=134064700&single=true&output=csv",
+  csvEngajamento: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQESGm3F1v6E2jFnRIQGzYa95peXCSnq78XkndaK3Y080r9Jeg2jxJlXzD9QxS5dffGRlUG_qkIanvs/pub?gid=405962107&single=true&output=csv",
+};
+// ════════════════════════════════════════════════════════════════
+
+// URL do seu proxy em Apps Script
+const PROXY_URL = "https://script.google.com/macros/s/AKfycbwvGocZJyqvNvhfEFypkGD3PgfAPmIt6xAo1A_2ncOuFPe0PamvJ_P2DLTQnIlrBCrw/exec";
+
+// Funções utilitárias
+const norm = s => String(s)
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g,'')
+  .toUpperCase()
+  .trim();
+
+function n(val) {
+  const v = parseFloat(String(val).replace(',','.'));
+  return isNaN(v) ? 0 : v;
+}
+function fmt(val) {
+  const v = n(val);
+  return v === 0 ? '—' : (v % 1 === 0 ? v.toFixed(0) : v.toFixed(1));
+}
+
+// Usa o proxy para buscar o CSV das planilhas
+async function fetchCSV(url) {
+  const proxy = PROXY_URL + "?url=" + encodeURIComponent(url);
+  const r = await fetch(proxy);
+  if (!r.ok) {
+    throw new Error('Não foi possível acessar a planilha via proxy. Status: ' + r.status);
+  }
+  return r.text();
+}
+
+let habData = [], engData = [];
+let metaTurma = { turma: '', dias: '', teacher: '', totalAulas: 0 };
+let donutChart = null, radarChart = null;
+
+// Parser adaptado ao CSV
+function parsePlanilha(text) {
+  const rawLines = text.split('\n');
+
+  function splitLine(line) {
+    const cols = []; let cur = '', inQ = false;
+    for (const c of line) {
+      if (c === '"') { inQ = !inQ; }
+      else if (c === ',' && !inQ) {
+        cols.push(cur.replace(/\r/g,'').trim());
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+    cols.push(cur.replace(/\r/g,'').trim());
+    return cols;
+  }
+
+  const linha0 = splitLine(rawLines[0] || '');
+  const linha1 = splitLine(rawLines[1] || '');
+  const linha2 = splitLine(rawLines[2] || '');
+  const linha3 = splitLine(rawLines[3] || ''); // cabeçalho
+
+  const turma = linha0.find(c => c) || '';
+  const dias = linha1.find(c => c) || '';
+  const teacherCell = linha2.find(c => (c || '').toLowerCase().includes('teacher')) || '';
+  const teacher = teacherCell.replace(/teacher\s*[:\-]?\s*/i, '').trim();
+
+  const headers = linha3.map(h => norm(h));
+
+  const alunos = [];
+  for (let i = 4; i < rawLines.length; i++) {
+    const cols = splitLine(rawLines[i]);
+    const obj = {};
+    headers.forEach((h, j) => { obj[h] = (cols[j] || '').trim(); });
+
+    const nome = obj[norm('NOME')] || '';
+    if (!nome || nome.toUpperCase().includes('RESUMO')) continue;
+
+    alunos.push(obj);
+  }
+
+  return { turma, dias, teacher, headers, alunos };
+}
+
+// Carrega dados
+async function loadData() {
+  const msg = document.getElementById('stateMsg');
+  try {
+    const [t1, t2] = await Promise.all([
+      fetchCSV(CONFIG.csvHabilidades),
+      fetchCSV(CONFIG.csvEngajamento)
+    ]);
+
+    const parsed1 = parsePlanilha(t1);
+    const parsed2 = parsePlanilha(t2);
+
+    habData = parsed1.alunos;
+    engData = parsed2.alunos;
+
+    const totalAulasVal = parsed2.alunos.length > 0
+      ? n(parsed2.alunos[0][norm('TOTAL DE AULAS')] || 0)
+      : 0;
+
+    metaTurma = {
+      turma:      parsed1.turma,
+      dias:       parsed1.dias,
+      teacher:    parsed1.teacher,
+      totalAulas: totalAulasVal,
+    };
+
+    if (habData.length === 0) throw new Error('Nenhum aluno encontrado. Verifique se a planilha está publicada.');
+
+    document.getElementById('turmaTag').textContent = metaTurma.turma || 'Turma';
+
+    const sel = document.getElementById('studentSelect');
+    sel.innerHTML = '<option value="">— Selecione um aluno —</option>';
+    habData.forEach((row, i) => {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = row[norm('NOME')];
+      sel.appendChild(opt);
+    });
+
+    msg.textContent = `✓ ${habData.length} aluno(s) carregado(s). Selecione e clique em "Ver Relatório".`;
+    setTimeout(() => { msg.style.display = 'none'; }, 4000);
+
+  } catch(e) {
+    console.error(e);
+    msg.innerHTML = `⚠️ Erro: <strong>${e.message}</strong><br><small>Verifique se a planilha está publicada como CSV.</small>`;
+    msg.classList.add('error');
+  }
+}
+
+// Renderiza relatório
+function renderStudent() {
+  const sel = document.getElementById('studentSelect');
+  if (sel.value === '') { alert('Selecione um aluno primeiro.'); return; }
+
+  const hab  = habData[sel.value];
+  const nome = hab[norm('NOME')] || '';
+
+  const eng = engData.find(r => norm(r[norm('NOME')] || '') === norm(nome)) || {};
+
+  const fala      = n(hab[norm('FALA')]);
+  const audicao   = n(hab[norm('AUDIÇÃO')]);
+  const leitura   = n(hab[norm('LEITURA')]);
+  const escrita   = n(hab[norm('ESCRITA')]);
+  const gramatica = n(hab[norm('GRAMÁTICA')]);
+  const media     = n(hab[norm('MÉDIA')]);
+
+  const faltas          = n(eng[norm('FALTAS')] || 0);
+  const desenvolvimento = n(eng[norm('DESENVOLVIMENTO')] || 0);
+  const engajamento     = n(eng[norm('ENGAJAMENTO')] || 0);
+  const presencaNota    = n(eng[norm('PRESENÇA')] || 0);
+
+  const totalAulas = metaTurma.totalAulas;
+
+  const presencaPct = totalAulas > 0 ? Math.round(((totalAulas - faltas) / totalAulas) * 100) : 0;
+  const assistidas  = totalAulas > 0 ? totalAulas - faltas : '—';
+
+  const periodo = new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+
+  document.getElementById('hNome').textContent    = nome;
+  document.getElementById('hPeriod').textContent  = metaTurma.dias ? metaTurma.dias + ' · ' + periodo : periodo;
+  document.getElementById('hTurma').textContent   = metaTurma.turma   || '—';
+  document.getElementById('hTeacher').textContent = metaTurma.teacher || '—';
+  document.getElementById('footerInfo').textContent = metaTurma.turma + ' · ' + periodo;
+
+  document.getElementById('badgePresenca').textContent  = fmt(presencaNota);
+  document.getElementById('donutPct').textContent       = totalAulas > 0 ? presencaPct + '%' : '—';
+  document.getElementById('statTotal').textContent      = totalAulas || '—';
+  document.getElementById('statFaltas').textContent     = faltas;
+  document.getElementById('statAssistidas').textContent = assistidas;
+
+  function setEng(pId, bId, v) {
+    document.getElementById(pId).textContent  = fmt(v);
+    document.getElementById(bId).style.width  = (v / 5 * 100) + '%';
+  }
+  setEng('engPresenca',        'engPresencaBar',       presencaNota);
+  setEng('engEngajamento',     'engEngajamentoBar',    engajamento);
+  setEng('engDesenvolvimento', 'engDesenvolvimentoBar', desenvolvimento);
+
+  function setBar(vId, bId, v) {
+    document.getElementById(vId).textContent = fmt(v);
+    document.getElementById(bId).style.width = (v / 5 * 100) + '%';
+  }
+  document.getElementById('badgeMedia').textContent = fmt(media);
+  document.getElementById('mediaGeral').textContent = fmt(media);
+  setBar('valFala',      'barFala',      fala);
+  setBar('valAudicao',   'barAudicao',   audicao);
+  setBar('valLeitura',   'barLeitura',   leitura);
+  setBar('valEscrita',   'barEscrita',   escrita);
+  setBar('valGramatica', 'barGramatica', gramatica);
+
+  if (donutChart) donutChart.destroy();
+  donutChart = new Chart(document.getElementById('donutChart').getContext('2d'), {
+    type: 'doughnut',
+    data: { datasets: [{ data: [presencaPct, 100 - presencaPct], backgroundColor: ['#6d28d9','#ede9fe'], borderWidth: 0 }] },
+    options: { cutout: '72%', animation: { duration: 800 }, plugins: { legend: { display: false }, tooltip: { enabled: false } } }
+  });
+
+  function mc(field) {
+    const key = norm(field);
+    const vals = habData
+      .map(r => n(r[key] || 0))
+      .filter(v => v > 0);
+    return vals.length ? vals.reduce((a,b) => a+b,0) / vals.length : 0;
+  }
+  const mt = [mc('FALA'), mc('AUDIÇÃO'), mc('LEITURA'), mc('ESCRITA'), mc('GRAMÁTICA')];
+
+  if (radarChart) radarChart.destroy();
+  radarChart = new Chart(document.getElementById('radarChart').getContext('2d'), {
+    type: 'radar',
+    data: {
+      labels: ['Fala','Audição','Leitura','Escrita','Gramática'],
+      datasets: [
+        { label:'Aluno', data:[fala,audicao,leitura,escrita,gramatica],
+          backgroundColor:'rgba(109,40,217,0.18)', borderColor:'rgba(109,40,217,0.85)',
+          borderWidth:2, pointBackgroundColor:'rgba(109,40,217,0.9)', pointRadius:4 },
+        { label:'Média da turma', data: mt,
+          backgroundColor:'rgba(148,163,184,0.10)', borderColor:'rgba(148,163,184,0.75)',
+          borderWidth:1.5, pointBackgroundColor:'rgba(148,163,184,0.8)', pointRadius:3 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ display:false } },
+      scales:{ r:{ suggestedMin:0, suggestedMax:5,
+        ticks:{ stepSize:1, backdropColor:'transparent', font:{ size:9 }, color:'#8b7fa8' },
+        grid:{ color:'#ece8f8' }, angleLines:{ color:'#ece8f8' },
+        pointLabels:{ color:'#4a3f6b', font:{ size:11, family:"'DM Sans',sans-serif" } }
+      }}
+    }
+  });
+
+  const primeiro = nome.split(' ')[0];
+  const habs = [
+    {label:'Fala',v:fala},{label:'Audição',v:audicao},{label:'Leitura',v:leitura},
+    {label:'Escrita',v:escrita},{label:'Gramática',v:gramatica}
+  ].filter(h=>h.v>0).sort((a,b)=>b.v-a.v);
+
+  const recos = [];
+  if (habs.length > 0) {
+    const top = habs[0];
+    if (top.v >= 4) recos.push(`${primeiro} demonstra excelente desempenho em <strong>${top.label}</strong> (nota ${fmt(top.v)}), destacando-se na turma.`);
+    const low = habs[habs.length-1];
+    if (low.v < 3.5 && habs.length > 1) recos.push(`Recomenda-se atenção especial em <strong>${low.label}</strong> (nota ${fmt(low.v)}). Atividades de reforço podem ajudar.`);
+  }
+  if (presencaPct >= 90) recos.push(`Ótima frequência (${presencaPct}%). Manter a regularidade é fundamental para o progresso no idioma.`);
+  else if (presencaPct > 0 && presencaPct < 80) recos.push(`Frequência abaixo do ideal (${presencaPct}%). Recomenda-se maior regularidade nas aulas.`);
+  if (engajamento >= 4) recos.push(`O engajamento em sala é muito positivo. Continue incentivando a participação ativa.`);
+  if (media >= 4) recos.push(`Média geral elevada (${fmt(media)}). ${primeiro} está no caminho certo — manter o ritmo!`);
+  if (recos.length === 0) recos.push(`${primeiro} apresenta desempenho regular. Acompanhamento contínuo é recomendado para evolução consistente.`);
+
+  document.getElementById('recoList').innerHTML = recos.map(r =>
+    `<div class="reco-item"><div class="reco-dot"></div><span>${r}</span></div>`
+  ).join('');
+
+  document.getElementById('reportPage').classList.add('visible');
+  document.getElementById('reportPage').scrollIntoView({ behavior: 'smooth' });
+}
+
+loadData();
+</script>
